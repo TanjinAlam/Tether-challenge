@@ -1,4 +1,4 @@
-# P2P Auction
+# P2P Auction | Kindly check hyperbee branch for implementation using hyperbee.
 
 Simple P2P Auction Using Hyperswarm
 
