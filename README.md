@@ -1,6 +1,7 @@
-# P2P Auction
+# P2P Auction using hyperswarm & hyperbee
 
-Simple P2P Auction Using Hyperswarm
+Simple P2P Auction Using Hyperswarm, hyperbee to store the data.
+
 
 ## Installation
 

@@ -1,4 +1,7 @@
 const Hyperswarm = require("hyperswarm");
+const Hypercore = require("hypercore");
+const Hyperbee = require("hyperbee");
+const crypto = require("crypto");
 const { CLI } = require("./common/cli");
 
 class Server {
@@ -7,8 +10,18 @@ class Server {
     this.cli = new CLI();
     this.players = new Map();
     this.clients = [];
-    this.auctions = new Map();
     this.auctionCounter = 0;
+
+    // Initialize Hypercore and Hyperbee
+    const core = new Hypercore(
+      `./my-auction-feed-${crypto.randomBytes(4).toString("hex")}`
+    );
+
+    this.db = new Hyperbee(core, {
+      keyEncoding: "utf-8",
+      valueEncoding: "json",
+    });
+
     const topic = Buffer.alloc(32).fill("p2p-auction");
 
     this.server.join(topic, {
@@ -20,10 +33,11 @@ class Server {
     console.log("Server is running....");
   }
 
-  handleConnection(socket, peerInfo) {
+  async handleConnection(socket, peerInfo) {
     try {
       console.log("New user joined");
       const publicKey = peerInfo.publicKey.toString("hex");
+      console.log("publicKey", publicKey);
       socket.write(
         JSON.stringify({
           type: "sync-pub-key",
@@ -35,17 +49,25 @@ class Server {
         this.clients.push(socket);
       }
 
-      socket.on("data", (data) => {
+      socket.on("data", async (data) => {
         try {
           const jsonData = JSON.parse(data.toString());
           if (jsonData.type === "make-auction") {
-            this.createAuction(publicKey, jsonData.msg, jsonData.nickname);
+            await this.createAuction(
+              publicKey,
+              jsonData.msg,
+              jsonData.nickname
+            );
           } else if (jsonData.type === "bid-auction") {
-            this.placeBid(jsonData.msg, jsonData.nickname, jsonData.publicKey);
+            await this.placeBid(
+              jsonData.msg,
+              jsonData.nickname,
+              jsonData.publicKey
+            );
           } else if (jsonData.type === "get-auction-table") {
-            this.sendAuctionTable(socket);
+            await this.sendAuctionTable(socket);
           } else if (jsonData.type === "close-auction") {
-            this.closeAuction(publicKey, jsonData.nickname);
+            await this.closeAuction(publicKey, jsonData.nickname);
           }
         } catch (error) {
           console.error("Error handling data event:", error);
@@ -56,16 +78,21 @@ class Server {
     }
   }
 
-  createAuction(publicKey, message, user) {
+  async createAuction(publicKey, message, user) {
     try {
       const { picture, price } = JSON.parse(`{${message}}`);
       const auctionId = this.auctionCounter++;
-      if (!this.auctions.has(publicKey)) {
-        this.auctions.set(publicKey, []);
-      }
-      this.auctions
-        .get(publicKey)
-        .push({ auctionId, picture, price, bids: [] });
+      const auction = {
+        auctionId,
+        picture,
+        price,
+        bids: [],
+        ownerPublicKey: publicKey,
+      };
+
+      // Save to Hyperbee
+      await this.db.put(`auction:${auctionId}`, auction);
+
       const msg = `Auction created by ${user} ID ${auctionId}, Picture: ${picture}, Starting Price: ${price} USDt`;
       this.respondToClients(msg, "notify-all-user");
     } catch (error) {
@@ -73,20 +100,24 @@ class Server {
     }
   }
 
-  placeBid(message, user, bidderPublicKey) {
+  async placeBid(message, user, bidderPublicKey) {
     try {
       const { auctionId, price } = JSON.parse(`{${message}}`);
-      const auctionOwnerPublicKey = this.findPublicKeyByAuctionId(auctionId);
-      if (auctionOwnerPublicKey && this.auctions.has(auctionOwnerPublicKey)) {
-        if (auctionOwnerPublicKey == bidderPublicKey) {
+
+      // Retrieve auction from Hyperbee
+      const auctionEntry = await this.db.get(`auction:${auctionId}`);
+      const auction = auctionEntry.value;
+
+      if (auction) {
+        if (auction.ownerPublicKey === bidderPublicKey) {
           const msg = `Owner cannot bid on their own auction.`;
           this.respondToClients(msg, "notify-all-user");
         } else {
-          const auction = this.auctions
-            .get(auctionOwnerPublicKey)
-            .find((a) => a.auctionId === auctionId);
+          auction.bids.push({ bidder: bidderPublicKey, price });
 
-          auction.bids.push(price);
+          // Update auction in Hyperbee
+          await this.db.put(`auction:${auctionId}`, auction);
+
           const msg = `Bid placed on Auction by ${user} ${price} USDt`;
           this.respondToClients(msg, "notify-all-user");
         }
@@ -99,29 +130,18 @@ class Server {
     }
   }
 
-  findPublicKeyByAuctionId(auctionId) {
-    for (const [publicKey, auctions] of this.auctions.entries()) {
-      if (auctions.some((a) => a.auctionId === auctionId)) {
-        return publicKey;
-      }
-    }
-    return null;
-  }
-
-  sendAuctionTable(socket) {
+  async sendAuctionTable(socket) {
     try {
       const auctionTable = [];
-      this.auctions.forEach((auctions, publicKey) => {
-        auctions.forEach((a) => {
-          auctionTable.push({
-            auctionId: a.auctionId,
-            publicKey,
-            picture: a.picture,
-            price: a.price,
-            bids: a.bids,
-          });
-        });
+      const stream = this.db.createReadStream({
+        gte: "auction:",
+        lt: "auction;",
       });
+
+      for await (const { key, value } of stream) {
+        auctionTable.push(value);
+      }
+
       socket.write(
         JSON.stringify({
           type: "auction-table",
@@ -133,25 +153,31 @@ class Server {
     }
   }
 
-  closeAuction(publicKey, user) {
+  async closeAuction(publicKey, user) {
     try {
-      if (this.auctions.has(publicKey)) {
-        const auctions = this.auctions.get(publicKey);
-        auctions.forEach((auction) => {
-          const highestBid = Math.max(...auction.bids);
-          const picture = auction.picture;
+      const stream = this.db.createReadStream({
+        gte: "auction:",
+        lt: "auction;",
+      });
+
+      for await (const { key, value } of stream) {
+        if (value.ownerPublicKey === publicKey) {
+          const highestBid = Math.max(
+            ...value.bids.map((bid) => bid.price),
+            -Infinity
+          );
+          const picture = value.picture;
           if (highestBid === -Infinity) {
             const msg = `Auction closed by ${user}, where no bids have been placed yet.`;
             this.respondToClients(msg, "notify-all-user");
           } else {
-            const msg = `Auction closed by ${user} Auction ID ${auction.auctionId}, Highest bid is ${highestBid} USDt for ${picture}`;
+            const msg = `Auction closed by ${user} Auction ID ${value.auctionId}, Highest bid is ${highestBid} USDt for ${picture}`;
             this.respondToClients(msg, "notify-all-user");
           }
-        });
-        this.auctions.delete(publicKey);
-      } else {
-        const msg = `No auctions found for ${user}.`;
-        this.respondToClients(msg, "notify-all-user");
+
+          // Delete auction from Hyperbee
+          await this.db.del(key);
+        }
       }
     } catch (error) {
       console.error("Error in closeAuction:", error);

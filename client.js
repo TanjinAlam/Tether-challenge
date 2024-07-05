@@ -17,7 +17,7 @@ class Client {
     this.client.on("connection", this.handleConnection);
   }
 
-  handleConnection(socket, peerInfo) {
+  handleConnection(socket) {
     this.connection = socket;
     socket.on("data", async (data) => {
       const jsonData = JSON.parse(data.toString());
@@ -66,7 +66,6 @@ class Client {
           })
         );
       } else if (number == 2) {
-        console.log(" this.publicKey", this.publicKey);
         const userInput = await this.cli.askTerminal(
           "Enter auction ID and bid price: "
         );
