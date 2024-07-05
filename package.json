@@ -1,0 +1,16 @@
+{
+  "name": "p2p-auction",
+  "version": "1.0.0",
+  "description": "P2P auction simulation using hyperswarm",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@hyperswarm/rpc": "^3.3.2",
+    "hyperswarm": "^4.7.14",
+    "readline": "^1.3.0"
+  }
+}
